@@ -62,6 +62,17 @@ type Options struct {
 	// ForceHTTP1 disables HTTP/2 negotiation entirely. Useful for servers that
 	// tarpit or consistently reject h2.
 	ForceHTTP1 bool
+
+	// ProtocolRacing races HTTP/3 (QUIC) and HTTP/2 (TCP) and uses whichever
+	// connects first, similar to Chrome's Happy Eyeballs. The client then reuses
+	// the winning protocol per host.
+	//
+	// This is the strongest lever against anti-bot rules that target the HTTP/2
+	// fingerprint: measured on a Cloudflare-protected page where every recent
+	// profile was blocked over HTTP/2, HTTP/3 answered 200 with both
+	// chrome_133 and chrome_150. Requires UDP egress; if QUIC is blocked the
+	// client falls back to TCP.
+	ProtocolRacing bool
 }
 
 // Response is a fully-read response, truncated at MaxBody.
@@ -70,6 +81,8 @@ type Response struct {
 	Header     http.Header
 	Body       []byte
 	FinalURL   string
+	// Proto is the negotiated protocol, e.g. "HTTP/2.0" or "HTTP/3.0".
+	Proto string
 
 	// Attempts is 1 for the first try, 2 when the HTTP/1.1 fallback was used.
 	Attempts int
@@ -118,7 +131,9 @@ func build(opts Options, forceH1 bool) (tlsclient.HttpClient, error) {
 		tlsclient.WithCookieJar(tlsclient.NewCookieJar()),
 	}
 	if forceH1 {
-		o = append(o, tlsclient.WithForceHttp1())
+		o = append(o, tlsclient.WithForceHttp1(), tlsclient.WithDisableHttp3())
+	} else if opts.ProtocolRacing {
+		o = append(o, tlsclient.WithProtocolRacing())
 	}
 	if opts.ProxyURL != "" {
 		o = append(o, tlsclient.WithProxyUrl(opts.ProxyURL))
@@ -227,6 +242,7 @@ func (c *Client) attempt(ctx context.Context, method, url string, client tlsclie
 		Header:     http.Header(resp.Header),
 		Body:       body,
 		FinalURL:   url,
+		Proto:      resp.Proto,
 		Attempts:   attempt,
 		HTTP1:      attempt == 2 || c.opts.ForceHTTP1,
 	}
@@ -265,6 +281,7 @@ func (c *Client) stdAttempt(ctx context.Context, method, url string, attempt int
 		Header:     resp.Header,
 		Body:       body,
 		FinalURL:   final,
+		Proto:      resp.Proto,
 		Attempts:   attempt,
 	}, nil
 }

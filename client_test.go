@@ -94,6 +94,28 @@ func TestForceHTTP1(t *testing.T) {
 	}
 }
 
+func TestProtocolRacingOption(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	// httptest serves plain TCP, so racing falls back to HTTP/1.1 or HTTP/2.
+	// The assertion is that enabling the option does not break normal requests
+	// and that the negotiated protocol is reported.
+	c := New(Options{Timeout: 5 * time.Second, ProtocolRacing: true})
+	resp, err := c.Get(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d", resp.StatusCode)
+	}
+	if resp.Proto == "" {
+		t.Error("Proto should be reported")
+	}
+}
+
 func TestClassify(t *testing.T) {
 	cases := []struct {
 		name     string
