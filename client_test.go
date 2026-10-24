@@ -177,6 +177,13 @@ func TestClassify(t *testing.T) {
 			wantKind: "",
 		},
 		{
+			name:     "403 without a body (HEAD)",
+			status:   403,
+			header:   map[string]string{"server": "cloudflare", "cf-ray": "abc"},
+			body:     "",
+			wantKind: "CF_BLOCK_GENERIC",
+		},
+		{
 			name:     "404 is not a block",
 			status:   404,
 			header:   map[string]string{"server": "cloudflare"},

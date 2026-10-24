@@ -77,6 +77,18 @@ func Classify(r *Response) *Block {
 				Hint:   cfHint(code),
 			}
 		}
+
+		// Cloudflare answered 403/503 without a body. Normal for HEAD requests
+		// and for stripped responses: every other marker lives in the body, so
+		// without this the block would be missed entirely.
+		if len(strings.TrimSpace(body)) < 32 {
+			return &Block{
+				Kind:   "CF_BLOCK_GENERIC",
+				RayID:  ray,
+				Server: server,
+				Hint:   "empty body (HEAD or stripped response): retry with GET to tell a challenge from a block",
+			}
+		}
 	}
 
 	// Third-party WAFs.
