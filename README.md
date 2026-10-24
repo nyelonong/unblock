@@ -64,7 +64,43 @@ throughput:
 sysctl -w net.core.rmem_max=7500000 net.core.wmem_max=7500000
 ```
 
-## 4. Block classification
+## 4. The ladder: one call, several attempts
+
+A single fetch is a gamble on one fingerprint. `Ladder` walks an ordered list of
+attempts and stops at the first rung that gets an answer:
+
+```go
+l := unblock.NewLadder(unblock.Options{Timeout: 20 * time.Second}).
+    WithMaxAttempts(4).
+    WithCooldown(unblock.NewCooldown(6 * time.Hour))
+
+resp, err := l.Get(ctx, url)
+
+for _, a := range l.Last() {          // what each rung did
+    fmt.Println(a.String(), a.Proto, a.HTTPStatus, a.BlockKind)
+}
+```
+
+Default order (`DefaultAttempts`): `chrome_133` over HTTP/2 → the same profile
+racing HTTP/3 → the same profile over HTTP/1.1 → `firefox_123` over HTTP/1.1.
+
+Rules that make it predictable:
+
+- A WAF block means "try the next rung".
+- Any answer from the origin — 200, 404, even 500 — ends the walk. Changing
+  fingerprints cannot fix a page that does not exist.
+- All rungs blocked → `*BlockedError` (wraps `ErrBlocked`) carrying the last
+  block and the full trail. The ladder never invents a verdict.
+- `WithCooldown` parks a host after a block; the next call returns
+  `*CooldownError` instead of hammering.
+- `Winner()` returns the fetcher that worked, so follow-up requests reuse the
+  same fingerprint.
+- `WithFetcherFactory` swaps how a rung is served (tests).
+
+Cost: a healthy site costs 1 request; a WAF-protected one usually 2 (HTTP/3
+wins); a network without UDP needs 3.
+
+## 5. Block classification
 
 Four different situations hide behind HTTP 403, and each needs a different action. `Classify` tells them apart from headers and body, with no extra requests:
 
@@ -137,6 +173,16 @@ func (c *Client) Do(ctx context.Context, method, url string) (*Response, error)
 func Classify(r *Response) *Block
 func HostOf(rawURL string) string
 func NewCooldown(window time.Duration) *Cooldown
+
+func NewLadder(base Options, attempts ...Attempt) *Ladder
+func DefaultAttempts() []Attempt
+func (l *Ladder) WithMaxAttempts(n int) *Ladder
+func (l *Ladder) WithCooldown(c *Cooldown) *Ladder
+func (l *Ladder) WithFetcherFactory(f func(Attempt) Fetcher) *Ladder
+func (l *Ladder) Get(ctx context.Context, url string) (*Response, error)
+func (l *Ladder) Head(ctx context.Context, url string) (*Response, error)
+func (l *Ladder) Winner() Fetcher
+func (l *Ladder) Last() []AttemptResult
 ```
 
 `Options`: `Profile`, `ProxyURL`, `Timeout`, `MaxBody`, `Headers`, `ForceHTTP1`, `ProtocolRacing`.

@@ -1,0 +1,198 @@
+package unblock
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"testing"
+	"time"
+)
+
+const ladderURL = "https://client.test/"
+
+type fakeFetcher struct {
+	resp  *Response
+	err   error
+	calls *int
+}
+
+func (f *fakeFetcher) Get(_ context.Context, _ string) (*Response, error) {
+	if f.calls != nil {
+		*f.calls++
+	}
+	return f.resp, f.err
+}
+
+func (f *fakeFetcher) Head(ctx context.Context, url string) (*Response, error) {
+	return f.Get(ctx, url)
+}
+
+func blockedResp() *Response {
+	return &Response{
+		StatusCode: 403,
+		Header:     http.Header{"Server": []string{"cloudflare"}, "Cf-Ray": []string{"abc-FRA"}},
+		Body:       []byte("<title>Attention Required! | Cloudflare</title>Sorry, you have been blocked"),
+		FinalURL:   ladderURL,
+		Proto:      "HTTP/2.0",
+	}
+}
+
+func okResp(proto string) *Response {
+	return &Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"text/html"}},
+		Body:       []byte("<html>ok</html>"),
+		FinalURL:   ladderURL,
+		Proto:      proto,
+	}
+}
+
+func TestLadderStopsAtFirstAnswer(t *testing.T) {
+	l := NewLadder(Options{}).
+		WithFetcherFactory(func(a Attempt) Fetcher {
+			if a.ProtocolRacing {
+				return &fakeFetcher{resp: okResp("HTTP/3.0")}
+			}
+			return &fakeFetcher{resp: blockedResp()}
+		})
+
+	resp, err := l.Get(context.Background(), ladderURL)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d", resp.StatusCode)
+	}
+	if resp.Proto != "HTTP/3.0" {
+		t.Errorf("proto = %q", resp.Proto)
+	}
+	trail := l.Last()
+	if len(trail) != 2 {
+		t.Fatalf("attempts = %d, want 2", len(trail))
+	}
+	if trail[0].BlockKind == "" || !trail[1].OK {
+		t.Errorf("trail incomplete: %+v", trail)
+	}
+	if !trail[1].ProtocolRacing {
+		t.Error("second rung should be the HTTP/3 one")
+	}
+	if l.Winner() == nil {
+		t.Error("Winner should be set")
+	}
+}
+
+func TestLadderAllBlocked(t *testing.T) {
+	l := NewLadder(Options{}, DefaultAttempts()...).
+		WithFetcherFactory(func(a Attempt) Fetcher {
+			return &fakeFetcher{resp: blockedResp()}
+		})
+
+	_, err := l.Get(context.Background(), ladderURL)
+	if err == nil {
+		t.Fatal("want an error when every rung is blocked")
+	}
+	if !errors.Is(err, ErrBlocked) {
+		t.Errorf("err = %v, want ErrBlocked", err)
+	}
+	var be *BlockedError
+	if !errors.As(err, &be) {
+		t.Fatalf("err = %T, want *BlockedError", err)
+	}
+	if be.Block == nil || be.Block.Kind != "CF_BLOCK_GENERIC" {
+		t.Errorf("block = %+v", be.Block)
+	}
+	if len(be.Attempts) != len(DefaultAttempts()) {
+		t.Errorf("attempts = %d, want %d", len(be.Attempts), len(DefaultAttempts()))
+	}
+	if l.Winner() != nil {
+		t.Error("Winner must be nil when nothing worked")
+	}
+}
+
+// An origin answer — even a 404 — ends the walk: the site responded, so changing
+// fingerprints cannot help.
+func TestLadderStopsOnOriginStatus(t *testing.T) {
+	var calls int
+	l := NewLadder(Options{}).WithFetcherFactory(func(a Attempt) Fetcher {
+		return &fakeFetcher{resp: &Response{StatusCode: 404, Header: http.Header{}, Body: []byte("nf"), FinalURL: ladderURL}, calls: &calls}
+	})
+
+	resp, err := l.Get(context.Background(), ladderURL)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+	if len(l.Last()) != 1 {
+		t.Errorf("attempts = %d, want 1", len(l.Last()))
+	}
+}
+
+func TestLadderMaxAttempts(t *testing.T) {
+	l := NewLadder(Options{}, DefaultAttempts()...).
+		WithMaxAttempts(2).
+		WithFetcherFactory(func(a Attempt) Fetcher { return &fakeFetcher{resp: blockedResp()} })
+
+	_, err := l.Get(context.Background(), ladderURL)
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(l.Last()) != 2 {
+		t.Errorf("attempts = %d, want 2", len(l.Last()))
+	}
+}
+
+func TestLadderCooldown(t *testing.T) {
+	cd := NewCooldown(50 * time.Millisecond)
+	l := NewLadder(Options{}, DefaultAttempts()...).
+		WithMaxAttempts(1).
+		WithCooldown(cd).
+		WithFetcherFactory(func(a Attempt) Fetcher { return &fakeFetcher{resp: blockedResp()} })
+
+	_, err := l.Get(context.Background(), ladderURL)
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("first call: %v", err)
+	}
+	if cd.Allow(HostOf(ladderURL)) {
+		t.Error("host should be parked after a block")
+	}
+
+	_, err = l.Get(context.Background(), ladderURL)
+	var ce *CooldownError
+	if !errors.As(err, &ce) {
+		t.Fatalf("second call err = %v, want *CooldownError", err)
+	}
+}
+
+func TestDefaultAttemptsOrder(t *testing.T) {
+	a := DefaultAttempts()
+	if len(a) < 4 {
+		t.Fatalf("want at least 4 rungs, got %d", len(a))
+	}
+	if a[0].Profile != "chrome_133" || a[0].ForceHTTP1 || a[0].ProtocolRacing {
+		t.Errorf("rung 1 = %+v, want chrome_133 over h2", a[0])
+	}
+	if !a[1].ProtocolRacing {
+		t.Errorf("rung 2 = %+v, want HTTP/3 racing", a[1])
+	}
+	if !a[2].ForceHTTP1 {
+		t.Errorf("rung 3 = %+v, want HTTP/1.1", a[2])
+	}
+	if a[3].Profile == a[0].Profile {
+		t.Errorf("rung 4 = %+v, want a different engine", a[3])
+	}
+}
+
+func TestAttemptString(t *testing.T) {
+	cases := map[string]Attempt{
+		"chrome_133 over HTTP/2":    {Profile: "chrome_133"},
+		"chrome_133 racing HTTP/3":  {Profile: "chrome_133", ProtocolRacing: true},
+		"firefox_123 over HTTP/1.1": {Profile: "firefox_123", ForceHTTP1: true},
+	}
+	for want, a := range cases {
+		if got := a.String(); got != want {
+			t.Errorf("String() = %q, want %q", got, want)
+		}
+	}
+}
