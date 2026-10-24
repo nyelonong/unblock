@@ -17,6 +17,7 @@
 package unblock
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -185,8 +186,19 @@ func (c *Client) Head(ctx context.Context, url string) (*Response, error) {
 // INTERNAL_ERROR), the request is retried once over HTTP/1.1 with the same TLS
 // fingerprint. Half of the time budget is reserved for that second attempt.
 func (c *Client) Do(ctx context.Context, method, url string) (*Response, error) {
+	return c.doWithBody(ctx, method, url, "", nil)
+}
+
+// Post sends a request with a body, which is what JSON endpoints behind a WAF
+// need (for example YouTube's continuation calls). The fingerprint is the same
+// as for Get.
+func (c *Client) Post(ctx context.Context, url, contentType string, body []byte) (*Response, error) {
+	return c.doWithBody(ctx, http.MethodPost, url, contentType, body)
+}
+
+func (c *Client) doWithBody(ctx context.Context, method, url, contentType string, body []byte) (*Response, error) {
 	if c.opts.ForceHTTP1 {
-		return c.attempt(ctx, method, url, c.clientFor(true), 1)
+		return c.attempt(ctx, method, url, contentType, body, c.clientFor(true), 1)
 	}
 
 	// Reserve half the budget for the fallback, so a hanging first attempt does
@@ -200,7 +212,7 @@ func (c *Client) Do(ctx context.Context, method, url string) (*Response, error) 
 		}
 	}
 
-	resp, err := c.attempt(primaryCtx, method, url, c.clientFor(false), 1)
+	resp, err := c.attempt(primaryCtx, method, url, contentType, body, c.clientFor(false), 1)
 	if err == nil {
 		return resp, nil
 	}
@@ -211,7 +223,7 @@ func (c *Client) Do(ctx context.Context, method, url string) (*Response, error) 
 	if h1 == nil {
 		return nil, err
 	}
-	return c.attempt(ctx, method, url, h1, 2)
+	return c.attempt(ctx, method, url, contentType, body, h1, 2)
 }
 
 func (c *Client) clientFor(forceH1 bool) tlsclient.HttpClient {
@@ -233,17 +245,24 @@ func (c *Client) clientFor(forceH1 bool) tlsclient.HttpClient {
 	return c.h1
 }
 
-func (c *Client) attempt(ctx context.Context, method, url string, client tlsclient.HttpClient, attempt int) (*Response, error) {
+func (c *Client) attempt(ctx context.Context, method, url, contentType string, body []byte, client tlsclient.HttpClient, attempt int) (*Response, error) {
 	if client == nil {
-		return c.stdAttempt(ctx, method, url, attempt)
+		return c.stdAttempt(ctx, method, url, contentType, body, attempt)
 	}
 
-	req, err := fhttp.NewRequestWithContext(ctx, method, url, nil)
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := fhttp.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
 		return nil, err
 	}
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
+	}
+	if contentType != "" {
+		req.Header.Set("content-type", contentType)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -251,14 +270,14 @@ func (c *Client) attempt(ctx context.Context, method, url string, client tlsclie
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, c.opts.MaxBody))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, c.opts.MaxBody))
 	if err != nil {
 		return nil, err
 	}
 	out := &Response{
 		StatusCode: resp.StatusCode,
 		Header:     http.Header(resp.Header),
-		Body:       body,
+		Body:       respBody,
 		FinalURL:   url,
 		Proto:      resp.Proto,
 		Attempts:   attempt,
@@ -272,13 +291,20 @@ func (c *Client) attempt(ctx context.Context, method, url string, client tlsclie
 
 // stdAttempt is the path without impersonation, used when the TLS client could
 // not be built (for example an unsupported profile on a given platform).
-func (c *Client) stdAttempt(ctx context.Context, method, url string, attempt int) (*Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+func (c *Client) stdAttempt(ctx context.Context, method, url, contentType string, body []byte, attempt int) (*Response, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
 		return nil, err
 	}
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
+	}
+	if contentType != "" {
+		req.Header.Set("content-type", contentType)
 	}
 	hc := &http.Client{Timeout: c.opts.Timeout}
 	resp, err := hc.Do(req)
@@ -286,7 +312,7 @@ func (c *Client) stdAttempt(ctx context.Context, method, url string, attempt int
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, c.opts.MaxBody))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, c.opts.MaxBody))
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +323,7 @@ func (c *Client) stdAttempt(ctx context.Context, method, url string, attempt int
 	return &Response{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
-		Body:       body,
+		Body:       respBody,
 		FinalURL:   final,
 		Proto:      resp.Proto,
 		Attempts:   attempt,
