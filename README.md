@@ -1,79 +1,79 @@
 # unblock
 
-HTTP client Go yang **menyerupai browser** di level jaringan, dan **tahu kapan dirinya diblokir**.
+A Go HTTP client that **looks like a browser** at the network layer, and **knows when it has been blocked**.
 
 ```go
 c := unblock.New(unblock.Options{})
-resp, err := c.Get(ctx, "https://contoh.id")
+resp, err := c.Get(ctx, "https://example.com")
 if b := resp.Blocked(); b != nil {
     fmt.Println(b.Kind, b.Hint) // CF_CHALLENGE / CF_BLOCK_1020 / WAF_GENERIC / ...
 }
 ```
 
-Tiga hal yang dikerjakan, dan satu yang tidak.
+Three things are handled, and one deliberately is not.
 
-## 1. Fingerprint TLS/JA3 + HTTP/2
+## 1. TLS/JA3 and HTTP/2 fingerprints
 
-`net/http`, `requests`, dan `httpx` punya sidik jari yang khas dan gampang dikenali. Saat konek HTTPS, client mengirim TLS ClientHello berisi cipher suite, urutan extension, kurva, dan ALPN — WAF menghitung itu jadi hash (JA3/JA4). Ditambah sidik jari HTTP/2: nilai `SETTINGS`, `WINDOW_UPDATE`, urutan pseudo-header.
+`net/http`, `requests`, and `httpx` all share a recognisable fingerprint. On an HTTPS connection the client sends a TLS ClientHello carrying cipher suites, extension order, elliptic curves, and ALPN — WAFs hash that into JA3/JA4. On top of it sits the HTTP/2 fingerprint: `SETTINGS` values, `WINDOW_UPDATE`, pseudo-header order.
 
-`unblock` memakai [`bogdanfinn/tls-client`](https://github.com/bogdanfinn/tls-client) (ClientHello via uTLS, h2 via fhttp) sehingga sidik jarinya menyerupai Chrome/Safari/Firefox asli:
+`unblock` uses [`bogdanfinn/tls-client`](https://github.com/bogdanfinn/tls-client) (ClientHello via uTLS, h2 via fhttp) so the fingerprint matches a real Chrome, Safari, or Firefox:
 
 ```go
 c := unblock.New(unblock.Options{
-    Profile: "chrome_133", // kosong = profil Chrome default (versi terbaru)
+    Profile: "chrome_133", // empty = newest supported Chrome profile
 })
 ```
 
-Setara konsepnya dengan `curl_cffi` di Python, tapi tanpa proses terpisah.
+Conceptually the same as `curl_cffi` in Python, without a separate process.
 
-## 2. Fallback HTTP/1.1 otomatis
+## 2. Automatic HTTP/1.1 fallback
 
-Sebagian server menolak negosiasi HTTP/2 dengan `RST_STREAM` (`stream ID 1; INTERNAL_ERROR`) walau TLS-nya lolos. `unblock` mendeteksi pola error itu, lalu mengulang **sekali** lewat HTTP/1.1 dengan fingerprint TLS yang sama.
+Some servers reject HTTP/2 negotiation with `RST_STREAM` (`stream ID 1; INTERNAL_ERROR`) even though TLS succeeded. `unblock` detects that error shape and retries **once** over HTTP/1.1 with the same TLS fingerprint.
 
-Percobaan pertama diberi separuh budget waktu, supaya retry tidak kehabisan waktu karena percobaan pertama menggantung. `Response.Attempts` dan `Response.HTTP1` melaporkan jalur mana yang dipakai.
+The first attempt only gets half the time budget, so the retry is not starved by a hanging first try. `Response.Attempts` and `Response.HTTP1` report which path was used.
 
 ```go
 resp, _ := c.Get(ctx, url)
-fmt.Println(resp.Attempts) // 1, atau 2 kalau fallback dipakai
+fmt.Println(resp.Attempts) // 1, or 2 when the fallback was used
 ```
 
-Paksa selalu HTTP/1.1 dengan `Options.ForceHTTP1`.
+Force HTTP/1.1 always with `Options.ForceHTTP1`.
 
-## 3. Klasifikasi blokir
+## 3. Block classification
 
-Empat situasi berbeda bersembunyi di balik HTTP 403, dan masing-masing butuh tindakan berbeda. `Classify` membedakannya dari header + body, tanpa request tambahan:
+Four different situations hide behind HTTP 403, and each needs a different action. `Classify` tells them apart from headers and body, with no extra requests:
 
-| `Kind` | Penanda | Tindakan |
+| `Kind` | Marker | What to do |
 |---|---|---|
-| `CF_CHALLENGE` | `cf-mitigated: challenge`, `_cf_chl_opt`, `Just a moment` | butuh browser yang mengeksekusi JS |
-| `CF_BLOCK_1010` | `Error 1010` | browser signature dibanned: pakai profil TLS, bukan UA palsu |
-| `CF_BLOCK_1009` | `Error 1009` | blokir negara: perlu proxy lokal |
-| `CF_BLOCK_1015` | `Error 1015` | rate limited: cooldown |
-| `CF_BLOCK_1020` | `Error 1020` | firewall rule menolak ASN/datacenter |
-| `WAF_GENERIC` | `x-sucuri-id`, `x-datadome`, `x-akamai-request-id`, `x-iinfo` | WAF pihak ketiga |
+| `CF_CHALLENGE` | `cf-mitigated: challenge`, `_cf_chl_opt`, `Just a moment` | needs a browser that executes JS |
+| `CF_BLOCK_1010` | `Error 1010` | browser signature banned: use a TLS profile, not a spoofed UA |
+| `CF_BLOCK_1009` | `Error 1009` | country block: needs a local proxy |
+| `CF_BLOCK_1015` | `Error 1015` | rate limited: add a cooldown |
+| `CF_BLOCK_1020` | `Error 1020` | firewall rule rejected the ASN/datacenter |
+| `WAF_GENERIC` | `x-sucuri-id`, `x-datadome`, `x-akamai-request-id`, `x-iinfo` | third-party WAF |
 
 ```go
 b := unblock.Classify(resp)
 if b != nil {
-    log.Printf("diblokir: %s (ray %s) — %s", b.Kind, b.RayID, b.Hint)
+    log.Printf("blocked: %s (ray %s) — %s", b.Kind, b.RayID, b.Hint)
 }
 if b.Challenge() {
-    // satu-satunya kategori yang bisa diselesaikan browser
+    // the only category a browser can resolve
 }
 ```
 
-403 dari origin (`forbidden` biasa, halaman login) sengaja **tidak** dianggap blokir — itu bukan urusan anti-bot.
+A plain 403 from the origin (a normal "forbidden" page, a login wall) is intentionally **not** treated as a block — that is not an anti-bot concern.
 
-## Cooldown per host
+## Per-host cooldown
 
-Blokir Cloudflare bersifat sticky: mengulang request ke host yang sama dalam waktu singkat justru menaikkan level blokir. `Cooldown` memberi jarak:
+Cloudflare blocks are sticky: hammering the same host within a short window tends to escalate the block. `Cooldown` buys distance:
 
 ```go
 cd := unblock.NewCooldown(6 * time.Hour)
 host := unblock.HostOf(url)
 
 if !cd.Allow(host) {
-    return fmt.Errorf("cooldown %s: %s lagi", host, cd.Remaining(host))
+    return fmt.Errorf("host %s is cooling down for %s", host, cd.Remaining(host))
 }
 resp, err := c.Get(ctx, url)
 if b := resp.Blocked(); b != nil {
@@ -81,13 +81,13 @@ if b := resp.Blocked(); b != nil {
 }
 ```
 
-## Yang TIDAK dikerjakan
+## What this does NOT do
 
-**Tidak ada eksekusi JavaScript.** Challenge Cloudflare managed (Turnstile, halaman "Checking your browser" yang menghitung token) tetap tidak bisa dilewati — fingerprint hanya menang melawan aturan yang murni berbasis TLS/h2.
+**It does not execute JavaScript.** A managed Cloudflare challenge (Turnstile, the "Checking your browser" page that computes a token) still cannot be bypassed — fingerprints only win against rules that are purely TLS/h2 based.
 
-Paket ini memberi tahu bahwa itu yang terjadi (`CF_CHALLENGE`), bukan berpura-pura bisa menyelesaikannya. Untuk itu kamu butuh browser sungguhan: FlareSolverr, [`go-rod`](https://github.com/go-rod/rod), atau browser pengguna sendiri.
+The package tells you that this is what happened (`CF_CHALLENGE`) instead of pretending to solve it. For that you need a real browser: FlareSolverr, [`go-rod`](https://github.com/go-rod/rod), or the end user's own browser.
 
-Juga di luar cakupan: IP reputation dan perilaku. IP datacenter tetap sering diblok walau sidik jarinya sempurna — pakai `Options.ProxyURL` untuk keluar dari IP tersebut.
+Also out of scope: IP reputation and behaviour. A datacenter IP is often blocked even with a perfect fingerprint — use `Options.ProxyURL` to leave that IP behind.
 
 ## Install
 
@@ -95,7 +95,7 @@ Juga di luar cakupan: IP reputation dan perilaku. IP datacenter tetap sering dib
 go get github.com/nyelonong/unblock
 ```
 
-Butuh Go 1.27+ (mengikuti `tls-client`).
+Requires Go 1.27+ (tracking `tls-client`).
 
 ## API
 
@@ -112,7 +112,7 @@ func NewCooldown(window time.Duration) *Cooldown
 
 `Options`: `Profile`, `ProxyURL`, `Timeout`, `MaxBody`, `Headers`, `ForceHTTP1`.
 
-`Response`: `StatusCode`, `Header`, `Body`, `FinalURL`, `Attempts`, `HTTP1`, plus `Get(header)` dan `Blocked()`.
+`Response`: `StatusCode`, `Header`, `Body`, `FinalURL`, `Attempts`, `HTTP1`, plus `Get(header)` and `Blocked()`.
 
 ## Test
 
@@ -120,8 +120,8 @@ func NewCooldown(window time.Duration) *Cooldown
 go test ./...
 ```
 
-Mencakup server sungguhan (httptest), batas body, header kustom, `ForceHTTP1`, 9 varian klasifikasi blokir, dan perilaku cooldown.
+Covers a real httptest server, body limits, custom headers, `ForceHTTP1`, 9 block-classification variants, and cooldown behaviour.
 
-## Lisensi
+## License
 
-MIT — lihat [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

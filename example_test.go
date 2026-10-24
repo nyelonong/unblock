@@ -10,10 +10,10 @@ import (
 	"github.com/nyelonong/unblock"
 )
 
-// Contoh mengambil halaman dengan fingerprint browser.
+// Fetch a page with a browser fingerprint.
 func ExampleClient_Get() {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("<html>halo</html>"))
+		_, _ = w.Write([]byte("<html>hello</html>"))
 	}))
 	defer srv.Close()
 
@@ -29,7 +29,7 @@ func ExampleClient_Get() {
 	// Output: 200 true true
 }
 
-// Contoh membedakan jenis blokir.
+// Tell block types apart.
 func ExampleClassify() {
 	h := http.Header{}
 	h.Set("Server", "cloudflare")
@@ -47,13 +47,13 @@ func ExampleClassify() {
 
 	// Output:
 	// CF_BLOCK_1020 1020 false
-	// firewall rule menolak ASN/datacenter: perlu proxy residensial
+	// firewall rule rejected the ASN/datacenter: needs a residential proxy
 }
 
-// Contoh memakai cooldown per host.
+// Use a per-host cooldown.
 func ExampleCooldown() {
 	cd := unblock.NewCooldown(time.Hour)
-	host := unblock.HostOf("https://contoh.id/halaman")
+	host := unblock.HostOf("https://example.com/page")
 
 	fmt.Println(cd.Allow(host))
 	cd.Mark(host)

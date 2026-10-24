@@ -20,7 +20,7 @@ jobs:
         run: |
           out=$(gofmt -l .)
           if [ -n "$out" ]; then
-            echo "file belum diformat:"; echo "$out"; exit 1
+            echo "files not formatted:"; echo "$out"; exit 1
           fi
 
       - name: vet

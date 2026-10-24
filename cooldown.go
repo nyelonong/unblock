@@ -7,14 +7,14 @@ import (
 	"time"
 )
 
-// DefaultCooldownWindow dipakai bila NewCooldown menerima durasi nol.
+// DefaultCooldownWindow is used when NewCooldown receives a zero duration.
 const DefaultCooldownWindow = 6 * time.Hour
 
-// Cooldown mencatat host yang baru saja memblokir kita.
+// Cooldown records hosts that just blocked us.
 //
-// Blokir Cloudflare bersifat "sticky": mengulang request ke host yang sama
-// dalam waktu singkat justru menaikkan level blokir (challenge menjadi block).
-// Cooldown memberi jarak sebelum host itu dicoba lagi.
+// Cloudflare blocks are sticky: repeating a request to the same host within a
+// short window tends to escalate the block (challenge becomes block). A
+// cooldown buys distance before that host is attempted again.
 type Cooldown struct {
 	window time.Duration
 
@@ -22,7 +22,7 @@ type Cooldown struct {
 	until map[string]time.Time
 }
 
-// NewCooldown membuat Cooldown dengan jendela tertentu. Nol berarti
+// NewCooldown creates a Cooldown with the given window. Zero means
 // DefaultCooldownWindow.
 func NewCooldown(window time.Duration) *Cooldown {
 	if window <= 0 {
@@ -31,7 +31,7 @@ func NewCooldown(window time.Duration) *Cooldown {
 	return &Cooldown{window: window, until: make(map[string]time.Time)}
 }
 
-// Allow melaporkan apakah host boleh dicoba sekarang.
+// Allow reports whether the host may be attempted now.
 func (c *Cooldown) Allow(host string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -39,7 +39,7 @@ func (c *Cooldown) Allow(host string) bool {
 	return !ok || time.Now().After(u)
 }
 
-// Remaining mengembalikan sisa waktu tunggu untuk host (0 bila boleh dicoba).
+// Remaining returns how long the host stays parked (0 when it is allowed).
 func (c *Cooldown) Remaining(host string) time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -53,14 +53,14 @@ func (c *Cooldown) Remaining(host string) time.Duration {
 	return 0
 }
 
-// Mark menandai host agar tidak dicoba selama jendela cooldown.
+// Mark parks the host for the cooldown window.
 func (c *Cooldown) Mark(host string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.until[hostKey(host)] = time.Now().Add(c.window)
 }
 
-// Reset menghapus penanda cooldown untuk host.
+// Reset clears the cooldown marker for a host.
 func (c *Cooldown) Reset(host string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -69,8 +69,8 @@ func (c *Cooldown) Reset(host string) {
 
 func hostKey(host string) string { return strings.ToLower(host) }
 
-// HostOf mengambil host (tanpa port) dari URL; mengembalikan string apa adanya
-// bila URL tidak bisa diparse.
+// HostOf returns the host (without port) of a URL, or the input unchanged when
+// it cannot be parsed.
 func HostOf(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Hostname() == "" {

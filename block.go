@@ -7,30 +7,30 @@ import (
 
 var errCodeRe = regexp.MustCompile(`Error[ ]?(\d{4})`)
 
-// Block menjelaskan satu peristiwa blokir.
+// Block describes a single blocking event.
 type Block struct {
-	// Kind adalah kategori: CF_CHALLENGE, CF_BLOCK_1009, CF_BLOCK_1010,
+	// Kind is the category: CF_CHALLENGE, CF_BLOCK_1009, CF_BLOCK_1010,
 	// CF_BLOCK_1015, CF_BLOCK_1020, CF_BLOCK_GENERIC, WAF_GENERIC.
 	Kind string `json:"kind"`
-	// Code adalah kode error Cloudflare bila ada (mis. "1020").
+	// Code is the Cloudflare error code when present (e.g. "1020").
 	Code string `json:"code,omitempty"`
-	// RayID berguna saat menghubungi support penyedia WAF atau pemilik situs.
+	// RayID helps when contacting WAF support or the site owner.
 	RayID string `json:"ray_id,omitempty"`
-	// Server adalah nilai header Server.
+	// Server is the value of the Server header.
 	Server string `json:"server,omitempty"`
-	// Hint menyarankan tindakan berikutnya.
+	// Hint suggests the next action.
 	Hint string `json:"hint,omitempty"`
 }
 
-// Challenge melaporkan apakah blokir ini bisa diselesaikan oleh browser yang
-// mengeksekusi JavaScript (FlareSolverr, go-rod, atau browser pengguna).
+// Challenge reports whether this block can be resolved by a browser that
+// executes JavaScript (FlareSolverr, go-rod, or the end user's browser).
 func (b *Block) Challenge() bool { return b != nil && b.Kind == "CF_CHALLENGE" }
 
-// Classify memeriksa apakah respons merupakan blokir WAF/anti-bot.
-// Mengembalikan nil bila bukan blokir.
+// Classify inspects a response and reports whether it is a WAF/anti-bot block.
+// It returns nil when the response is not a block.
 //
-// Empat situasi berbeda bersembunyi di balik HTTP 403, dan masing-masing butuh
-// respons yang berbeda — jangan pernah memperlakukannya sebagai satu kasus.
+// Four different situations hide behind HTTP 403, and each needs a different
+// response — never treat them as one case.
 func Classify(r *Response) *Block {
 	if r == nil {
 		return nil
@@ -56,7 +56,7 @@ func Classify(r *Response) *Block {
 				Kind:   "CF_CHALLENGE",
 				RayID:  ray,
 				Server: server,
-				Hint:   "managed challenge: butuh browser yang mengeksekusi JS (FlareSolverr / go-rod), atau verifikasi lewat browser pengguna",
+				Hint:   "managed challenge: needs a browser that executes JS (FlareSolverr / go-rod), or verification through the user's own browser",
 			}
 		}
 
@@ -79,14 +79,14 @@ func Classify(r *Response) *Block {
 		}
 	}
 
-	// WAF pihak ketiga.
+	// Third-party WAFs.
 	if r.StatusCode == 403 || r.StatusCode == 429 {
 		for _, k := range []string{"x-sucuri-id", "x-akamai-request-id", "x-datadome", "x-iinfo"} {
 			if h.Get(k) != "" {
 				return &Block{
 					Kind:   "WAF_GENERIC",
 					Server: server,
-					Hint:   "WAF pihak ketiga menolak request; perlu proxy residensial atau browser asli",
+					Hint:   "third-party WAF rejected the request; needs a residential proxy or a real browser",
 				}
 			}
 		}
@@ -97,15 +97,15 @@ func Classify(r *Response) *Block {
 func cfHint(code string) string {
 	switch code {
 	case "1009":
-		return "blokir per negara: perlu proxy dari negara target"
+		return "country block: needs a proxy in the target country"
 	case "1010":
-		return "browser signature dibanned: pastikan memakai profil TLS browser, bukan user-agent palsu"
+		return "browser signature banned: use a real TLS profile instead of a spoofed user-agent"
 	case "1015":
-		return "rate limited: tambahkan cooldown per host"
+		return "rate limited: add a per-host cooldown"
 	case "1020":
-		return "firewall rule menolak ASN/datacenter: perlu proxy residensial"
+		return "firewall rule rejected the ASN/datacenter: needs a residential proxy"
 	default:
-		return "WAF menolak request: coba proxy residensial atau browser asli"
+		return "WAF rejected the request: try a residential proxy or a real browser"
 	}
 }
 

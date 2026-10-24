@@ -31,10 +31,10 @@ func TestGetRealServer(t *testing.T) {
 		t.Fatalf("unexpected response: %d %q", resp.StatusCode, resp.Body)
 	}
 	if resp.Get("x-test") != "yes" {
-		t.Errorf("header hilang: %v", resp.Header)
+		t.Errorf("header missing: %v", resp.Header)
 	}
 	if resp.Blocked() != nil {
-		t.Errorf("respons normal tidak boleh dianggap blokir")
+		t.Errorf("a normal response must not be classified as a block")
 	}
 
 	head, err := c.Head(ctx, srv.URL)
@@ -58,7 +58,7 @@ func TestMaxBody(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	if len(resp.Body) != 100 {
-		t.Errorf("body = %d byte, want 100", len(resp.Body))
+		t.Errorf("body = %d bytes, want 100", len(resp.Body))
 	}
 }
 
@@ -74,7 +74,7 @@ func TestHeadersOption(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	if string(resp.Body) != "abc" {
-		t.Errorf("header tidak terkirim, body = %q", resp.Body)
+		t.Errorf("header was not sent, body = %q", resp.Body)
 	}
 }
 
@@ -90,7 +90,7 @@ func TestForceHTTP1(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	if !resp.HTTP1 {
-		t.Error("HTTP1 flag seharusnya true saat ForceHTTP1")
+		t.Error("HTTP1 flag should be true when ForceHTTP1 is set")
 	}
 }
 
@@ -104,14 +104,14 @@ func TestClassify(t *testing.T) {
 		wantCode string
 	}{
 		{
-			name:     "challenge lewat header cf-mitigated",
+			name:     "challenge via cf-mitigated header",
 			status:   403,
 			header:   map[string]string{"server": "cloudflare", "cf-mitigated": "challenge", "cf-ray": "abc-JKT"},
 			body:     "<html>checking your browser</html>",
 			wantKind: "CF_CHALLENGE",
 		},
 		{
-			name:     "challenge lewat penanda body",
+			name:     "challenge via body marker",
 			status:   503,
 			header:   map[string]string{"server": "cloudflare"},
 			body:     `<script>window._cf_chl_opt={}</script>`,
@@ -126,7 +126,7 @@ func TestClassify(t *testing.T) {
 			wantCode: "1020",
 		},
 		{
-			name:     "browser signature dibanned 1010",
+			name:     "browser signature banned 1010",
 			status:   403,
 			header:   map[string]string{"server": "cloudflare"},
 			body:     "<h2>Error 1010</h2>Access denied",
@@ -134,38 +134,38 @@ func TestClassify(t *testing.T) {
 			wantCode: "1010",
 		},
 		{
-			name:     "blokir tanpa kode",
+			name:     "block without an error code",
 			status:   403,
 			header:   map[string]string{"server": "cloudflare", "cf-ray": "x"},
 			body:     "<title>Attention Required! | Cloudflare</title>",
 			wantKind: "CF_BLOCK_GENERIC",
 		},
 		{
-			name:     "waf sucuri",
+			name:     "sucuri waf",
 			status:   403,
 			header:   map[string]string{"x-sucuri-id": "1234"},
 			body:     "blocked",
 			wantKind: "WAF_GENERIC",
 		},
 		{
-			name:     "403 biasa dari origin",
+			name:     "plain 403 from the origin",
 			status:   403,
 			header:   map[string]string{},
 			body:     "<html>forbidden</html>",
 			wantKind: "",
 		},
 		{
-			name:     "404 bukan blokir",
+			name:     "404 is not a block",
 			status:   404,
 			header:   map[string]string{"server": "cloudflare"},
 			body:     "not found",
 			wantKind: "",
 		},
 		{
-			name:     "403 dengan server cloudflare tapi bukan bot block",
+			name:     "403 behind cloudflare but not a bot block",
 			status:   403,
 			header:   map[string]string{"server": "cloudflare"},
-			body:     "<html>halaman ini hanya untuk member</html>",
+			body:     "<html>this page is for members only</html>",
 			wantKind: "",
 		},
 	}
@@ -194,7 +194,7 @@ func TestClassify(t *testing.T) {
 				t.Errorf("code = %s, want %s", got.Code, tc.wantCode)
 			}
 			if got.Hint == "" {
-				t.Error("hint tidak boleh kosong untuk blokir")
+				t.Error("a block must carry a hint")
 			}
 		})
 	}
@@ -202,42 +202,42 @@ func TestClassify(t *testing.T) {
 
 func TestChallenge(t *testing.T) {
 	if !(&Block{Kind: "CF_CHALLENGE"}).Challenge() {
-		t.Error("CF_CHALLENGE seharusnya Challenge() = true")
+		t.Error("CF_CHALLENGE should report Challenge() = true")
 	}
 	if (&Block{Kind: "CF_BLOCK_1020"}).Challenge() {
-		t.Error("CF_BLOCK_1020 bukan challenge yang bisa diselesaikan browser")
+		t.Error("CF_BLOCK_1020 is not a challenge a browser can resolve")
 	}
 	var b *Block
 	if b.Challenge() {
-		t.Error("nil Block tidak boleh panic dan harus false")
+		t.Error("a nil Block must not panic and must return false")
 	}
 }
 
 func TestCooldown(t *testing.T) {
 	cd := NewCooldown(50 * time.Millisecond)
-	if !cd.Allow("contoh.id") {
-		t.Fatal("host baru seharusnya boleh dicoba")
+	if !cd.Allow("example.id") {
+		t.Fatal("a new host should be allowed")
 	}
-	cd.Mark("contoh.id")
-	if cd.Allow("contoh.id") {
-		t.Error("host yang ditandai seharusnya ditolak")
+	cd.Mark("example.id")
+	if cd.Allow("example.id") {
+		t.Error("a marked host should be denied")
 	}
-	if cd.Remaining("contoh.id") <= 0 {
-		t.Error("Remaining seharusnya positif")
+	if cd.Remaining("example.id") <= 0 {
+		t.Error("Remaining should be positive")
 	}
-	if !cd.Allow("lain.id") {
-		t.Error("host lain tidak boleh terpengaruh")
+	if !cd.Allow("other.id") {
+		t.Error("other hosts must not be affected")
 	}
-	cd.Reset("contoh.id")
-	if !cd.Allow("contoh.id") {
-		t.Error("setelah Reset, host boleh dicoba lagi")
+	cd.Reset("example.id")
+	if !cd.Allow("example.id") {
+		t.Error("after Reset the host should be allowed again")
 	}
 
 	cd2 := NewCooldown(10 * time.Millisecond)
 	cd2.Mark("x.id")
 	time.Sleep(20 * time.Millisecond)
 	if !cd2.Allow("x.id") {
-		t.Error("cooldown seharusnya kedaluwarsa")
+		t.Error("the cooldown should have expired")
 	}
 }
 
@@ -245,7 +245,7 @@ func TestHostOf(t *testing.T) {
 	cases := map[string]string{
 		"https://a.b.c/path":      "a.b.c",
 		"http://localhost:8080/x": "localhost",
-		"bukan url":               "bukan url",
+		"not a url":               "not a url",
 	}
 	for in, want := range cases {
 		if got := HostOf(in); got != want {

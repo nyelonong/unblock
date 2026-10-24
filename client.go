@@ -1,19 +1,19 @@
-// Package unblock adalah HTTP client Go yang menyerupai browser (ClientHello
-// dan HTTP/2 fingerprint Chrome) dan tahu kapan dirinya diblokir.
+// Package unblock is an HTTP client for Go that looks like a browser at the
+// network layer (Chrome-like TLS ClientHello and HTTP/2 fingerprint) and knows
+// when it has been blocked.
 //
-// Tiga hal yang ditangani:
+// Three things are handled:
 //
-//  1. TLS/JA3 dan HTTP/2 fingerprint — lewat bogdanfinn/tls-client, sehingga
-//     aturan WAF berbasis fingerprint tidak menolak request.
-//  2. Fallback HTTP/1.1 otomatis ketika server menolak HTTP/2 (RST_STREAM),
-//     dengan fingerprint TLS yang sama.
-//  3. Klasifikasi blokir — Cloudflare challenge, error 1009/1010/1015/1020,
-//     dan WAF pihak ketiga dibedakan satu sama lain, karena masing-masing
-//     butuh tindakan berbeda.
+//  1. TLS/JA3 and HTTP/2 fingerprints — via bogdanfinn/tls-client, so WAF rules
+//     based on fingerprints do not reject the request.
+//  2. Automatic HTTP/1.1 fallback when a server rejects HTTP/2 (RST_STREAM),
+//     reusing the same TLS fingerprint.
+//  3. Block classification — Cloudflare challenges, errors 1009/1010/1015/1020,
+//     and third-party WAFs are told apart from one another, because each needs a
+//     different follow-up action.
 //
-// Paket ini TIDAK mengeksekusi JavaScript. Challenge Cloudflare yang butuh JS
-// tetap tidak bisa dilewati di sini; Classify hanya memberi tahu bahwa itu
-// yang terjadi.
+// This package does NOT execute JavaScript. A Cloudflare challenge that requires
+// JS cannot be bypassed here; Classify only reports that this is what happened.
 package unblock
 
 import (
@@ -30,57 +30,60 @@ import (
 	"github.com/bogdanfinn/tls-client/profiles"
 )
 
-// DefaultTimeout adalah batas waktu per percobaan bila Options.Timeout kosong.
+// DefaultTimeout is the per-attempt deadline when Options.Timeout is zero.
 const DefaultTimeout = 20 * time.Second
 
-// DefaultMaxBody adalah batas ukuran body (5 MiB).
+// DefaultMaxBody caps how many body bytes are read (5 MiB).
 const DefaultMaxBody = 5 << 20
 
-// Options mengatur perilaku Client.
+// ErrNoBody is returned when a response carries no usable payload.
+var ErrNoBody = errors.New("unblock: empty body")
+
+// Options configures a Client.
 type Options struct {
-	// Profile adalah nama preset TLS, mis. "chrome_133" atau "firefox_135".
-	// Kosong berarti profil Chrome default paket (versi terbaru yang didukung).
-	// Lihat profiles.MappedTLSClients untuk daftar lengkap.
+	// Profile names a TLS preset, e.g. "chrome_133" or "firefox_135".
+	// Empty means the package default Chrome profile (the newest supported one).
+	// See profiles.MappedTLSClients for the full list.
 	Profile string
 
-	// ProxyURL opsional: "http://127.0.0.1:8080" atau "socks5://10.0.0.2:1080".
+	// ProxyURL is optional: "http://127.0.0.1:8080" or "socks5://10.0.0.2:1080".
 	ProxyURL string
 
-	// Timeout per percobaan. Kosong berarti DefaultTimeout.
+	// Timeout per attempt. Zero means DefaultTimeout.
 	Timeout time.Duration
 
-	// MaxBody membatasi jumlah byte body yang dibaca. Kosong berarti DefaultMaxBody.
+	// MaxBody caps the number of body bytes read. Zero means DefaultMaxBody.
 	MaxBody int64
 
-	// Headers ditambahkan ke setiap request. Header yang sudah diatur profil
-	// TLS (user-agent, accept, dsb) akan ditimpa oleh nilai di sini.
+	// Headers are added to every request. Values here override whatever the TLS
+	// profile sets (user-agent, accept, and so on).
 	Headers map[string]string
 
-	// ForceHTTP1 mematikan negosiasi HTTP/2 sepenuhnya. Berguna untuk server
-	// yang men-tarpit atau menolak h2 secara konsisten.
+	// ForceHTTP1 disables HTTP/2 negotiation entirely. Useful for servers that
+	// tarpit or consistently reject h2.
 	ForceHTTP1 bool
 }
 
-// Response adalah respons yang sudah dibaca penuh (dibatasi MaxBody).
+// Response is a fully-read response, truncated at MaxBody.
 type Response struct {
 	StatusCode int
 	Header     http.Header
 	Body       []byte
 	FinalURL   string
 
-	// Attempts berisi 1 untuk percobaan pertama, 2 bila fallback HTTP/1.1 dipakai.
+	// Attempts is 1 for the first try, 2 when the HTTP/1.1 fallback was used.
 	Attempts int
-	// HTTP1 bernilai true bila respons datang dari jalur fallback HTTP/1.1.
+	// HTTP1 is true when the response came from the HTTP/1.1 fallback path.
 	HTTP1 bool
 }
 
-// Get mengambil URL dengan metode GET.
+// Get returns the value of a response header.
 func (r *Response) Get(name string) string { return r.Header.Get(name) }
 
-// Blocked mengembalikan detail blokir, atau nil bila respons bukan blokir.
+// Blocked returns block details, or nil when the response is not a block.
 func (r *Response) Blocked() *Block { return Classify(r) }
 
-// Client adalah fetcher dengan fingerprint browser.
+// Client is a fetcher with a browser fingerprint.
 type Client struct {
 	opts   Options
 	client tlsclient.HttpClient
@@ -89,9 +92,9 @@ type Client struct {
 	h1 tlsclient.HttpClient
 }
 
-// New membuat Client. Konfigurasi yang tidak valid tidak membuat New gagal:
-// Client akan memakai fallback tanpa impersonation (net/http) supaya pemanggil
-// tidak perlu menangani error di jalur inisialisasi.
+// New builds a Client. An unusable configuration does not make New fail: the
+// client falls back to plain net/http so callers never have to handle an error
+// on the construction path.
 func New(opts Options) *Client {
 	if opts.Timeout == 0 {
 		opts.Timeout = DefaultTimeout
@@ -103,7 +106,7 @@ func New(opts Options) *Client {
 	if tc, err := build(opts, opts.ForceHTTP1); err == nil {
 		c.client = tc
 	} else {
-		c.client = nil // pakai jalur net/http
+		c.client = nil // plain net/http path
 	}
 	return c
 }
@@ -132,29 +135,29 @@ func profileByName(name string) profiles.ClientProfile {
 	return profiles.DefaultClientProfile
 }
 
-// Get mengambil URL. Request mengikuti redirect secara default.
+// Get fetches a URL. Redirects are followed.
 func (c *Client) Get(ctx context.Context, url string) (*Response, error) {
 	return c.Do(ctx, http.MethodGet, url)
 }
 
-// Head mengirim HEAD. Sebagian server menolak HEAD; pemanggil yang perlu fallback
-// ke Get harus melakukannya sendiri.
+// Head sends a HEAD request. Some servers reject HEAD; callers that need a body
+// should fall back to Get themselves.
 func (c *Client) Head(ctx context.Context, url string) (*Response, error) {
 	return c.Do(ctx, http.MethodHead, url)
 }
 
-// Do menjalankan request dan mengembalikan body lengkap.
+// Do performs the request and returns the full body.
 //
-// Bila percobaan pertama gagal karena masalah HTTP/2 (RST_STREAM, INTERNAL_ERROR),
-// request diulang sekali lewat HTTP/1.1 dengan fingerprint TLS yang sama.
-// Separuh budget waktu disisakan untuk percobaan kedua.
+// When the first attempt fails because of an HTTP/2 problem (RST_STREAM,
+// INTERNAL_ERROR), the request is retried once over HTTP/1.1 with the same TLS
+// fingerprint. Half of the time budget is reserved for that second attempt.
 func (c *Client) Do(ctx context.Context, method, url string) (*Response, error) {
 	if c.opts.ForceHTTP1 {
 		return c.attempt(ctx, method, url, c.clientFor(true), 1)
 	}
 
-	// Sisakan separuh budget untuk fallback, supaya percobaan pertama yang
-	// menggantung tidak menghabiskan seluruh waktu.
+	// Reserve half the budget for the fallback, so a hanging first attempt does
+	// not consume the entire deadline.
 	primaryCtx := ctx
 	if dl, ok := ctx.Deadline(); ok {
 		if remaining := time.Until(dl); remaining > 2*time.Second {
@@ -233,8 +236,8 @@ func (c *Client) attempt(ctx context.Context, method, url string, client tlsclie
 	return out, nil
 }
 
-// stdAttempt adalah jalur tanpa impersonation, dipakai bila konstruksi TLS
-// client gagal (mis. profil tidak dikenal di platform tertentu).
+// stdAttempt is the path without impersonation, used when the TLS client could
+// not be built (for example an unsupported profile on a given platform).
 func (c *Client) stdAttempt(ctx context.Context, method, url string, attempt int) (*Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
@@ -266,10 +269,7 @@ func (c *Client) stdAttempt(ctx context.Context, method, url string, attempt int
 	}, nil
 }
 
-// ErrNoBody dipakai saat respons tidak membawa data yang diharapkan.
-var ErrNoBody = errors.New("unblock: empty body")
-
-// isHTTP2Error mendeteksi kegagalan khas negosiasi HTTP/2.
+// isHTTP2Error detects failures typical of HTTP/2 negotiation.
 func isHTTP2Error(err error) bool {
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "internal_error") ||
