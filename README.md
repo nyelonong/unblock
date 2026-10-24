@@ -26,7 +26,29 @@ c := unblock.New(unblock.Options{
 
 Conceptually the same as `curl_cffi` in Python, without a separate process.
 
-## 2. Automatic HTTP/1.1 fallback
+## 2. Headers follow the fingerprint
+
+`tls-client` fingerprints the handshake and the HTTP/2 frames, but it leaves the
+headers alone. A bare client therefore sends `Go-http-client/2.0` **with a Chrome
+TLS fingerprint** — a mismatch any WAF will flag, and the kind of thing you only
+notice by looking at what the server actually receives.
+
+`unblock` derives a consistent header set from the profile:
+
+| Header | Source |
+|---|---|
+| `user-agent` | the profile's browser and version |
+| `sec-ch-ua`, `sec-ch-ua-mobile`, `sec-ch-ua-platform` | same version, Chromium-family only |
+| `accept`, `accept-language`, `accept-encoding` | navigation defaults |
+| `sec-fetch-dest/mode/site/user`, `upgrade-insecure-requests` | navigation defaults |
+
+So **no manual user-agent**. `unblock.DefaultHeaders("chrome_133")` is exported if
+you need the set. Override through `Options.Headers` only when the value stays
+consistent with the profile — `accept-language` is safe; a hand-written
+user-agent that disagrees with `sec-ch-ua` and the TLS fingerprint is worse than
+sending nothing at all.
+
+## 3. Automatic HTTP/1.1 fallback
 
 Some servers reject HTTP/2 negotiation with `RST_STREAM` (`stream ID 1; INTERNAL_ERROR`) even though TLS succeeded. `unblock` detects that error shape and retries **once** over HTTP/1.1 with the same TLS fingerprint.
 
@@ -39,7 +61,7 @@ fmt.Println(resp.Attempts) // 1, or 2 when the fallback was used
 
 Force HTTP/1.1 always with `Options.ForceHTTP1`.
 
-## 3. HTTP/3 protocol racing
+## 4. HTTP/3 protocol racing
 
 Rules that block the HTTP/2 fingerprint usually do not apply to HTTP/3, which
 has its own fingerprint surface. `ProtocolRacing` starts QUIC and TCP in
@@ -64,7 +86,7 @@ throughput:
 sysctl -w net.core.rmem_max=7500000 net.core.wmem_max=7500000
 ```
 
-## 4. The ladder: one call, several attempts
+## 5. The ladder: one call, several attempts
 
 A single fetch is a gamble on one fingerprint. `Ladder` walks an ordered list of
 attempts and stops at the first rung that gets an answer:
@@ -100,7 +122,7 @@ Rules that make it predictable:
 Cost: a healthy site costs 1 request; a WAF-protected one usually 2 (HTTP/3
 wins); a network without UDP needs 3.
 
-## 5. Block classification
+## 6. Block classification
 
 Four different situations hide behind HTTP 403, and each needs a different action. `Classify` tells them apart from headers and body, with no extra requests:
 
@@ -170,6 +192,7 @@ func (c *Client) Get(ctx context.Context, url string) (*Response, error)
 func (c *Client) Head(ctx context.Context, url string) (*Response, error)
 func (c *Client) Do(ctx context.Context, method, url string) (*Response, error)
 
+func DefaultHeaders(profile string) map[string]string
 func Classify(r *Response) *Block
 func HostOf(rawURL string) string
 func NewCooldown(window time.Duration) *Cooldown

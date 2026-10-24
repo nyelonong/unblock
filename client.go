@@ -55,8 +55,9 @@ type Options struct {
 	// MaxBody caps the number of body bytes read. Zero means DefaultMaxBody.
 	MaxBody int64
 
-	// Headers are added to every request. Values here override whatever the TLS
-	// profile sets (user-agent, accept, and so on).
+	// Headers override the browser-consistent defaults derived from Profile
+	// (user-agent, sec-ch-ua, accept, sec-fetch-*). Set one only when you know
+	// the value stays consistent with the profile's fingerprint.
 	Headers map[string]string
 
 	// ForceHTTP1 disables HTTP/2 negotiation entirely. Useful for servers that
@@ -98,8 +99,9 @@ func (r *Response) Blocked() *Block { return Classify(r) }
 
 // Client is a fetcher with a browser fingerprint.
 type Client struct {
-	opts   Options
-	client tlsclient.HttpClient
+	opts    Options
+	headers map[string]string
+	client  tlsclient.HttpClient
 
 	mu sync.Mutex
 	h1 tlsclient.HttpClient
@@ -115,7 +117,7 @@ func New(opts Options) *Client {
 	if opts.MaxBody == 0 {
 		opts.MaxBody = DefaultMaxBody
 	}
-	c := &Client{opts: opts}
+	c := &Client{opts: opts, headers: mergeHeaders(opts.Profile, opts.Headers)}
 	if tc, err := build(opts, opts.ForceHTTP1); err == nil {
 		c.client = tc
 	} else {
@@ -224,7 +226,7 @@ func (c *Client) attempt(ctx context.Context, method, url string, client tlsclie
 	if err != nil {
 		return nil, err
 	}
-	for k, v := range c.opts.Headers {
+	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
 	resp, err := client.Do(req)
@@ -259,7 +261,7 @@ func (c *Client) stdAttempt(ctx context.Context, method, url string, attempt int
 	if err != nil {
 		return nil, err
 	}
-	for k, v := range c.opts.Headers {
+	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
 	hc := &http.Client{Timeout: c.opts.Timeout}
