@@ -5,8 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/bogdanfinn/tls-client/profiles"
 )
 
 // Attempt is one fetch strategy: a TLS profile plus the protocol controls that
@@ -48,12 +52,47 @@ type Fetcher interface {
 // wholesale. Ties break on how common the browser version is in the wild, not on
 // release date.
 func DefaultAttempts() []Attempt {
+	chrome := resolveProfile(preferredChrome, "chrome")
+	firefox := resolveProfile(preferredFirefox, "firefox")
 	return []Attempt{
-		{Profile: "chrome_133"},
-		{Profile: "chrome_133", ProtocolRacing: true},
-		{Profile: "chrome_133", ForceHTTP1: true},
-		{Profile: "firefox_123", ForceHTTP1: true},
+		{Profile: chrome},
+		{Profile: chrome, ProtocolRacing: true},
+		{Profile: chrome, ForceHTTP1: true},
+		{Profile: firefox, ForceHTTP1: true},
 	}
+}
+
+// The measured picks. These are lookup keys, not copies of the profiles: if the
+// package drops a version, resolveProfile degrades to the newest preset of the
+// same family instead of falling back to an unrelated default.
+const (
+	preferredChrome  = "chrome_133"
+	preferredFirefox = "firefox_123"
+)
+
+func resolveProfile(preferred, family string) string {
+	if _, ok := profiles.MappedTLSClients[preferred]; ok {
+		return preferred
+	}
+	best, bestMajor := "", -1
+	for name, p := range profiles.MappedTLSClients {
+		if !strings.HasPrefix(name, family+"_") ||
+			strings.Contains(name, "_PSK") || strings.Contains(name, "_PQ") {
+			continue
+		}
+		major, _ := splitVersion(p.GetClientHelloId().Version)
+		n, err := strconv.Atoi(major)
+		if err != nil {
+			continue
+		}
+		if n > bestMajor {
+			best, bestMajor = name, n
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return preferred
 }
 
 // ErrBlocked is returned when every rung was blocked by a WAF.
