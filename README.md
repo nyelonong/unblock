@@ -86,7 +86,20 @@ throughput:
 sysctl -w net.core.rmem_max=7500000 net.core.wmem_max=7500000
 ```
 
-## 5. The ladder: one call, several attempts
+### HTTP/3 cannot travel through a proxy
+
+HTTP `CONNECT` tunnels **TCP**. QUIC runs on **UDP**, so a racing rung with
+`ProxyURL` set does not degrade to h2 over the proxy — it connects directly and
+leaves your real exit IP exposed.
+
+`unblock` therefore ignores `ProtocolRacing` when a proxy is configured, and a
+ladder records such rungs as `skipped` instead of running them.
+
+Need h3 *and* an egress? The tunnel has to carry UDP: WireGuard, SOCKS5 UDP
+ASSOCIATE, or MASQUE (CONNECT-UDP). An HTTP proxy cannot do it, no matter how it
+is configured.
+
+## 4. The ladder: one call, several attempts
 
 A single fetch is a gamble on one fingerprint. `Ladder` walks an ordered list of
 attempts and stops at the first rung that gets an answer:

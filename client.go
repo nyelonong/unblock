@@ -74,6 +74,11 @@ type Options struct {
 	// chrome_133 and chrome_150. Requires UDP egress; if QUIC is blocked the
 	// client falls back to TCP.
 	ProtocolRacing bool
+
+	// InsecureSkipVerify disables certificate verification. Only for internal
+	// hosts with self-signed certificates and for tests; it does not affect the
+	// fingerprint, only trust.
+	InsecureSkipVerify bool
 }
 
 // Response is a fully-read response, truncated at MaxBody.
@@ -132,10 +137,21 @@ func build(opts Options, forceH1 bool) (tlsclient.HttpClient, error) {
 		tlsclient.WithClientProfile(profileByName(opts.Profile)),
 		tlsclient.WithCookieJar(tlsclient.NewCookieJar()),
 	}
-	if forceH1 {
+	if opts.InsecureSkipVerify {
+		o = append(o, tlsclient.WithInsecureSkipVerify())
+	}
+
+	switch {
+	case forceH1:
 		o = append(o, tlsclient.WithForceHttp1(), tlsclient.WithDisableHttp3())
-	} else if opts.ProtocolRacing {
+	case opts.ProtocolRacing && opts.ProxyURL == "":
 		o = append(o, tlsclient.WithProtocolRacing())
+	case opts.ProxyURL != "":
+		// HTTP CONNECT tunnels TCP only, so a QUIC handshake cannot travel
+		// through it. Racing with a proxy configured does not degrade to h2 over
+		// the proxy -- it connects directly and leaves the caller's real IP
+		// exposed. Never race when an egress is configured.
+		o = append(o, tlsclient.WithDisableHttp3())
 	}
 	if opts.ProxyURL != "" {
 		o = append(o, tlsclient.WithProxyUrl(opts.ProxyURL))

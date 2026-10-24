@@ -217,6 +217,16 @@ func (l *Ladder) do(ctx context.Context, method, url string) (*Response, error) 
 		if tried >= l.max {
 			break
 		}
+		// QUIC cannot traverse an HTTP CONNECT tunnel. Racing with an egress
+		// configured would connect directly and leak the caller's real IP, so a
+		// racing rung is skipped entirely rather than silently downgraded.
+		if a.ProtocolRacing && l.base.ProxyURL != "" {
+			results = append(results, AttemptResult{
+				Attempt: a,
+				Error:   "skipped: HTTP/3 cannot travel through a CONNECT proxy",
+			})
+			continue
+		}
 		tried++
 
 		f := l.fetcherFor(a)
