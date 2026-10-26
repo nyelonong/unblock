@@ -37,6 +37,13 @@ type Fetcher interface {
 	Head(ctx context.Context, url string) (*Response, error)
 }
 
+// Poster is the extra surface Ladder.Post needs from each rung. *Client
+// satisfies it. It is separate from Fetcher so a fetcher that only reads
+// still works everywhere else.
+type Poster interface {
+	Post(ctx context.Context, url, contentType string, body []byte) (*Response, error)
+}
+
 // DefaultAttempts is the measured starting order.
 //
 // Basis: 17 profiles, one WAF-protected page, single GET each.
@@ -177,16 +184,29 @@ func (l *Ladder) WithFetcherFactory(f func(Attempt) Fetcher) *Ladder {
 
 // Get fetches a URL, walking the ladder.
 func (l *Ladder) Get(ctx context.Context, url string) (*Response, error) {
-	return l.do(ctx, http.MethodGet, url)
+	return l.do(ctx, http.MethodGet, url, "", nil)
 }
 
 // Head sends a HEAD request, walking the ladder.
 func (l *Ladder) Head(ctx context.Context, url string) (*Response, error) {
-	return l.do(ctx, http.MethodHead, url)
+	return l.do(ctx, http.MethodHead, url, "", nil)
+}
+
+// Post sends a request with a body, walking the ladder, with the same cooldown
+// and trail as Get.
+//
+// The next rung resends the same body after a WAF block. A block is answered
+// by the WAF before the origin sees the request, but use Post only for requests
+// that are safe to repeat, such as read-only JSON APIs: the ladder cannot tell
+// whether a request that failed in transit reached the origin, and Client
+// already resends over HTTP/1.1 after an HTTP/2 failure.
+func (l *Ladder) Post(ctx context.Context, url, contentType string, body []byte) (*Response, error) {
+	return l.do(ctx, http.MethodPost, url, contentType, body)
 }
 
 // Winner returns the fetcher that produced the last successful response, so
-// follow-up requests reuse the same fingerprint.
+// follow-up requests reuse the same fingerprint. For a follow-up POST, assert it
+// to Poster; a *Client winner satisfies it.
 func (l *Ladder) Winner() Fetcher {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -214,7 +234,7 @@ func (l *Ladder) Last() []AttemptResult {
 	return out
 }
 
-func (l *Ladder) do(ctx context.Context, method, url string) (*Response, error) {
+func (l *Ladder) do(ctx context.Context, method, url, contentType string, body []byte) (*Response, error) {
 	host := HostOf(url)
 	if l.cool != nil && !l.cool.Allow(host) {
 		return nil, &CooldownError{Host: host, Remaining: l.cool.Remaining(host)}
@@ -259,6 +279,16 @@ func (l *Ladder) do(ctx context.Context, method, url string) (*Response, error) 
 		switch method {
 		case http.MethodHead:
 			resp, err = f.Head(ctx, url)
+		case http.MethodPost:
+			p, ok := f.(Poster)
+			if !ok {
+				l.record(results, nil)
+				if l.cool != nil && lastBlock != nil {
+					l.cool.Mark(host)
+				}
+				return nil, fmt.Errorf("unblock: the fetcher for %s cannot send POST requests", a)
+			}
+			resp, err = p.Post(ctx, url, contentType, body)
 		default:
 			resp, err = f.Get(ctx, url)
 		}

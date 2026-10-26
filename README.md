@@ -110,6 +110,7 @@ l := unblock.NewLadder(unblock.Options{Timeout: 20 * time.Second}).
     WithCooldown(unblock.NewCooldown(6 * time.Hour))
 
 resp, err := l.Get(ctx, url)
+resp, err = l.Post(ctx, apiURL, "application/json", body) // read-only APIs only
 
 for _, a := range l.Last() {          // what each rung did
     fmt.Println(a.String(), a.Proto, a.HTTPStatus, a.BlockKind)
@@ -130,7 +131,10 @@ Rules that make it predictable:
   `*CooldownError` instead of hammering.
 - `Winner()` returns the fetcher that worked, so follow-up requests reuse the
   same fingerprint.
-- `WithFetcherFactory` swaps how a rung is served (tests).
+- `WithFetcherFactory` swaps how a rung is served (tests). For `Post`, the
+  fetcher must also implement `Poster`.
+- `Post` walks the same rungs and shares the cooldown. The next rung resends the
+  body after a block, so use it only for requests that are safe to repeat.
 
 Cost: a healthy site costs 1 request; a WAF-protected one usually 2 (HTTP/3
 wins); a network without UDP needs 3.
@@ -230,6 +234,7 @@ func New(opts Options) *Client
 func (c *Client) Get(ctx context.Context, url string) (*Response, error)
 func (c *Client) Head(ctx context.Context, url string) (*Response, error)
 func (c *Client) Do(ctx context.Context, method, url string) (*Response, error)
+func (c *Client) Post(ctx context.Context, url, contentType string, body []byte) (*Response, error)
 func (c *Client) CloseIdleConnections()
 
 func DefaultHeaders(profile string) map[string]string
@@ -244,6 +249,7 @@ func (l *Ladder) WithCooldown(c *Cooldown) *Ladder
 func (l *Ladder) WithFetcherFactory(f func(Attempt) Fetcher) *Ladder
 func (l *Ladder) Get(ctx context.Context, url string) (*Response, error)
 func (l *Ladder) Head(ctx context.Context, url string) (*Response, error)
+func (l *Ladder) Post(ctx context.Context, url, contentType string, body []byte) (*Response, error)
 func (l *Ladder) Winner() Fetcher
 func (l *Ladder) Last() []AttemptResult
 func (l *Ladder) CloseIdleConnections()
