@@ -193,6 +193,18 @@ func (l *Ladder) Winner() Fetcher {
 	return l.winner
 }
 
+// CloseIdleConnections closes the keep-alive connections of every rung's
+// client. Call it when a short-lived ladder is done.
+func (l *Ladder) CloseIdleConnections() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, f := range l.clients {
+		if c, ok := f.(interface{ CloseIdleConnections() }); ok {
+			c.CloseIdleConnections()
+		}
+	}
+}
+
 // Last returns the trail of the most recent walk.
 func (l *Ladder) Last() []AttemptResult {
 	l.mu.Lock()

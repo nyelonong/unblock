@@ -241,6 +241,20 @@ func (c *Client) doWithBody(ctx context.Context, method, url, contentType string
 	return c.attempt(ctx, method, url, contentType, body, h1, 2)
 }
 
+// CloseIdleConnections closes the keep-alive connections the client holds. Call
+// it when the client is done, so a short-lived client does not keep sockets
+// open until the idle timeout.
+func (c *Client) CloseIdleConnections() {
+	if c.client != nil {
+		c.client.CloseIdleConnections()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.h1 != nil {
+		c.h1.CloseIdleConnections()
+	}
+}
+
 func (c *Client) clientFor(forceH1 bool) tlsclient.HttpClient {
 	if !forceH1 {
 		return c.client
@@ -327,6 +341,7 @@ func (c *Client) stdAttempt(ctx context.Context, method, url, contentType string
 		transport.DialContext = c.opts.Dialer.DialContext
 		transport.Proxy = nil
 		hc.Transport = transport
+		defer transport.CloseIdleConnections()
 	}
 	resp, err := hc.Do(req)
 	if err != nil {

@@ -230,6 +230,7 @@ func New(opts Options) *Client
 func (c *Client) Get(ctx context.Context, url string) (*Response, error)
 func (c *Client) Head(ctx context.Context, url string) (*Response, error)
 func (c *Client) Do(ctx context.Context, method, url string) (*Response, error)
+func (c *Client) CloseIdleConnections()
 
 func DefaultHeaders(profile string) map[string]string
 func Classify(r *Response) *Block
@@ -245,6 +246,7 @@ func (l *Ladder) Get(ctx context.Context, url string) (*Response, error)
 func (l *Ladder) Head(ctx context.Context, url string) (*Response, error)
 func (l *Ladder) Winner() Fetcher
 func (l *Ladder) Last() []AttemptResult
+func (l *Ladder) CloseIdleConnections()
 ```
 
 `Options`: `Profile`, `ProxyURL`, `Timeout`, `MaxBody`, `Headers`, `ForceHTTP1`, `ProtocolRacing`, `InsecureSkipVerify`, `Dialer`.

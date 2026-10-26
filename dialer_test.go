@@ -176,3 +176,34 @@ func TestLadderSkipsRacingWithDialer(t *testing.T) {
 		t.Fatalf("racing rung not recorded as skipped: %+v", trail)
 	}
 }
+
+func TestLadderCloseIdleConnections(t *testing.T) {
+	var closed int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			atomic.AddInt32(&closed, 1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	l := NewLadder(Options{Timeout: 5 * time.Second}, Attempt{Profile: "chrome_133"})
+	if _, err := l.Get(context.Background(), srv.URL); err != nil {
+		t.Fatalf("ladder: %v", err)
+	}
+	if got := atomic.LoadInt32(&closed); got != 0 {
+		t.Fatalf("connection closed before CloseIdleConnections (%d)", got)
+	}
+
+	l.CloseIdleConnections()
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&closed) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("server never saw the idle connection close")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
