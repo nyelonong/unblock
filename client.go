@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -80,6 +81,14 @@ type Options struct {
 	// hosts with self-signed certificates and for tests; it does not affect the
 	// fingerprint, only trust.
 	InsecureSkipVerify bool
+
+	// Dialer opens every TCP connection, so its Control hook sees each resolved
+	// address, redirects included. Use it to refuse private networks when the URL
+	// comes from a user. QUIC does not use it, so setting Dialer disables HTTP/3
+	// and ProtocolRacing. With ProxyURL set, Control sees only the proxy's
+	// address: the proxy resolves and connects to the target, so the guard no
+	// longer applies to it.
+	Dialer *net.Dialer
 }
 
 // Response is a fully-read response, truncated at MaxBody.
@@ -142,9 +151,15 @@ func build(opts Options, forceH1 bool) (tlsclient.HttpClient, error) {
 		o = append(o, tlsclient.WithInsecureSkipVerify())
 	}
 
+	if opts.Dialer != nil {
+		o = append(o, tlsclient.WithDialer(*opts.Dialer))
+	}
+
 	switch {
 	case forceH1:
 		o = append(o, tlsclient.WithForceHttp1(), tlsclient.WithDisableHttp3())
+	case opts.Dialer != nil:
+		o = append(o, tlsclient.WithDisableHttp3())
 	case opts.ProtocolRacing && opts.ProxyURL == "":
 		o = append(o, tlsclient.WithProtocolRacing())
 	case opts.ProxyURL != "":
@@ -307,6 +322,12 @@ func (c *Client) stdAttempt(ctx context.Context, method, url, contentType string
 		req.Header.Set("content-type", contentType)
 	}
 	hc := &http.Client{Timeout: c.opts.Timeout}
+	if c.opts.Dialer != nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.DialContext = c.opts.Dialer.DialContext
+		transport.Proxy = nil
+		hc.Transport = transport
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err

@@ -227,6 +227,13 @@ func (l *Ladder) do(ctx context.Context, method, url string) (*Response, error) 
 			})
 			continue
 		}
+		if a.ProtocolRacing && l.base.Dialer != nil {
+			results = append(results, AttemptResult{
+				Attempt: a,
+				Error:   "skipped: HTTP/3 does not go through Options.Dialer",
+			})
+			continue
+		}
 		tried++
 
 		f := l.fetcherFor(a)

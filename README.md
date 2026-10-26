@@ -181,6 +181,32 @@ if b := resp.Blocked(); b != nil {
 }
 ```
 
+## Fetching URLs your users typed
+
+A server that fetches a user-supplied URL must not let it reach internal
+addresses (SSRF). Pass a `net.Dialer` whose `Control` hook refuses them; it runs
+after DNS resolution on every TCP connection, redirects included:
+
+```go
+c := unblock.New(unblock.Options{
+    Dialer: &net.Dialer{Control: func(_, address string, _ syscall.RawConn) error {
+        host, _, _ := net.SplitHostPort(address)
+        ip := net.ParseIP(host)
+        if ip == nil || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+            ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+            return fmt.Errorf("%s is not public", host)
+        }
+        return nil
+    }},
+})
+```
+
+QUIC does not go through the dialer, so a `Dialer` disables HTTP/3: the client
+ignores `ProtocolRacing`, and a ladder records racing rungs as `skipped`.
+
+With `ProxyURL` set, `Control` sees only the proxy's address. The proxy resolves
+and connects to the target itself, so the guard has to live in the proxy.
+
 ## What this does NOT do
 
 **It does not execute JavaScript.** A managed Cloudflare challenge (Turnstile, the "Checking your browser" page that computes a token) still cannot be bypassed — fingerprints only win against rules that are purely TLS/h2 based.
@@ -195,7 +221,7 @@ Also out of scope: IP reputation and behaviour. A datacenter IP is often blocked
 go get github.com/nyelonong/unblock
 ```
 
-Requires Go 1.27+ (tracking `tls-client`).
+Requires Go 1.25+ (`tls-client` v1.16.0 or newer).
 
 ## API
 
@@ -221,7 +247,7 @@ func (l *Ladder) Winner() Fetcher
 func (l *Ladder) Last() []AttemptResult
 ```
 
-`Options`: `Profile`, `ProxyURL`, `Timeout`, `MaxBody`, `Headers`, `ForceHTTP1`, `ProtocolRacing`.
+`Options`: `Profile`, `ProxyURL`, `Timeout`, `MaxBody`, `Headers`, `ForceHTTP1`, `ProtocolRacing`, `InsecureSkipVerify`, `Dialer`.
 
 `Response`: `StatusCode`, `Header`, `Body`, `FinalURL`, `Proto`, `Attempts`, `HTTP1`, plus `Get(header)` and `Blocked()`.
 
